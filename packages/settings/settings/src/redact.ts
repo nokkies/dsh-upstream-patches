@@ -4,6 +4,11 @@
  * each schema-declared secret position and whether it currently holds a value,
  * so a configuration surface can render a write-only input without ever
  * receiving the secret itself.
+ *
+ * The walker is fail-closed: a node kind the walker cannot prove secret-free
+ * (`transform`, `lazy`, or an unknown type) throws instead of passing its
+ * value through, so a schema that hides a secret behind an unverifiable node
+ * cannot be served on a wire surface at all.
  * @module @deepseek-ai/dsh-settings/redact
  */
 
@@ -15,11 +20,13 @@ import type z from '@deepseek-ai/schemastery'
  */
 interface SchemaNode {
   type?: string
-  meta?: { role?: unknown }
+  meta?: { role?: unknown; default?: unknown }
   /** `object` properties, keyed by property name. */
   dict?: Record<string, SchemaNode>
   /** `dict`/`array` element schema. */
   inner?: SchemaNode
+  /** `tuple`/`union`/`intersect` member schemas. */
+  list?: SchemaNode[]
 }
 
 /** One schema-declared secret position inside a redacted value. */
@@ -41,6 +48,27 @@ export interface RedactedValue {
    */
   secrets: RedactedSecret[]
 }
+
+/**
+ * Thrown when a schema node can hold secrets the walker cannot verify. The
+ * wire surface that asked for the redacted value surfaces this error instead
+ * of serving the value, refusing the namespace until the schema is
+ * restructured so every secret is declared on a walked field.
+ */
+export class UnprovableSchemaError extends Error {
+  constructor(type: string, path: string[]) {
+    super(
+      `redactSecrets: a ${JSON.stringify(type)} node at ${JSON.stringify(path)} can contain secrets the walker cannot verify; declare the secret on a field reached through object, dict, array, tuple, union, or intersect, or keep the namespace off the wire.`,
+    )
+    this.name = 'UnprovableSchemaError'
+  }
+}
+
+/**
+ * Node kinds with no child relation: a `role('secret')` on the node itself is
+ * handled before the type switch, so nothing secret can hide underneath.
+ */
+const SAFE_LEAF_TYPES = new Set(['string', 'number', 'boolean', 'bitset', 'const', 'any', 'never', 'function', 'is'])
 
 /** Whether a value is a plain data object the walker may recurse into. */
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -83,27 +111,83 @@ function walk(node: SchemaNode | undefined, value: unknown, path: string[], secr
       if (!Array.isArray(value)) return value
       return value.map((entry, index) => walk(node.inner, entry, [...path, String(index)], secrets))
     }
+    case 'tuple': {
+      if (!Array.isArray(value)) return value
+      const members = node.list ?? []
+      return value.map((entry, index) => walk(members[index], entry, [...path, String(index)], secrets))
+    }
+    case 'union':
+    case 'intersect': {
+      // Pass one: enumerate every declared position against the original
+      // value, so the `set` flags report what the value held before any
+      // member stripped it. Pass two: re-apply every member's own walk to
+      // the value; each container walk deletes exactly the positions it
+      // declared, so nothing is ever resolved that is not present. A
+      // safe-leaf member is the identity. A member the walker cannot
+      // classify throws from its own walk.
+      const found: RedactedSecret[] = []
+      for (const member of node.list ?? []) walk(member, value, path, found)
+      let stripped = value
+      for (const member of node.list ?? []) stripped = walk(member, stripped, path, [])
+      const record = new Map<string, boolean>()
+      for (const position of found) {
+        const key = position.path.join('\u0000')
+        record.set(key, (record.get(key) ?? false) || position.set)
+      }
+      for (const [key, set] of record) secrets.push({ path: key.split('\u0000'), set })
+      return stripped
+    }
     default:
-      // TODO(settings-wire-redaction): Fail closed instead — a secret reachable
-      // only through a union, intersection, or transform is returned verbatim
-      // here, with nothing recording that it was missed.
-      return value
+      if (SAFE_LEAF_TYPES.has(node.type ?? '')) return value
+      throw new UnprovableSchemaError(node.type ?? 'unknown', path)
   }
 }
 
 /**
  * Remove every `role('secret')` field a schema declares from a value. The
- * walker follows `object`, `dict`, and `array` containers; a secret must be
- * declared directly on a field reachable through those containers (a secret
- * buried inside a union branch or transform is not reachable and must not be
- * modeled that way). The input is never mutated.
+ * walker follows `object`, `dict`, `array`, `tuple` containers and walks
+ * every `union`/`intersect` member; a secret must be declared on a field
+ * reachable through those, or on the member itself. Nodes the walker cannot
+ * prove secret-free — `transform`, `lazy`, or an unknown type — throw
+ * {@link UnprovableSchemaError} instead of passing their value through. The
+ * input is never mutated.
  * @param schema - live schemastery schema describing the value.
  * @param value - the value to strip; `undefined` yields an empty record with
  *   object-property secret slots still enumerated.
  * @returns the stripped detached value and the ordered secret positions.
+ * @throws UnprovableSchemaError when a node kind can hide a declared secret
+ *   the walker cannot verify.
  */
 export function redactSecrets(schema: z<never>, value: unknown): RedactedValue {
   const secrets: RedactedSecret[] = []
   const stripped = walk(schema, value, [], secrets)
   return { value: stripped, secrets }
+}
+
+/** One serialized node in a `schema.toJSON()` envelope's flat `refs` map. */
+interface SerializedSchemaNode {
+  meta?: { role?: unknown; default?: unknown }
+}
+
+/** The envelope shape `schema.toJSON()` returns: a root uid plus a flat refs map. */
+interface SerializedSchemaEnvelope {
+  refs?: Record<string, SerializedSchemaNode | undefined> | null
+}
+
+/**
+ * Remove `meta.default` from every serialized node marked `role('secret')` in
+ * a `schema.toJSON()` envelope, so a default set on a secret field never
+ * reaches a client with the wire descriptor. The envelope is mutated in place
+ * (each `describe()` call mints a fresh one) and returned.
+ * @param envelope - the `schema.toJSON()` result for one schema; anything
+ *   without a `refs` map is returned untouched.
+ * @returns the same envelope with secret-node defaults removed.
+ */
+export function scrubSchemaSecrets(envelope: unknown): unknown {
+  const refs = (envelope as SerializedSchemaEnvelope | null | undefined)?.refs
+  if (refs === null || typeof refs !== 'object') return envelope
+  for (const node of Object.values(refs)) {
+    if (node?.meta?.role === 'secret') delete node.meta.default
+  }
+  return envelope
 }

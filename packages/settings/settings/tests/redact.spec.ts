@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { redactSecrets } from '../src/index.ts'
+import { redactSecrets, scrubSchemaSecrets, UnprovableSchemaError } from '../src/index.ts'
 import { MemorySettings } from './memory.ts'
 
 const Profile = z.object({
@@ -100,6 +100,135 @@ describe('redactSecrets', () => {
     expect(redactSecrets({ type: 'dict' } as never, { k: 'v' })).toEqual({ value: { k: 'v' }, secrets: [] })
     expect(redactSecrets({ type: 'object' } as never, { k: 'v' })).toEqual({ value: { k: 'v' }, secrets: [] })
     expect(redactSecrets({ type: 'array' } as never, ['v'])).toEqual({ value: ['v'], secrets: [] })
+    expect(redactSecrets({ type: 'tuple' } as never, ['v'])).toEqual({ value: ['v'], secrets: [] })
+    expect(redactSecrets({ type: 'tuple' } as never, 'v')).toEqual({ value: 'v', secrets: [] })
+    expect(redactSecrets({ type: 'union' } as never, 'v')).toEqual({ value: 'v', secrets: [] })
+  })
+
+  it('walks const unions and other safe leaves without touching their values', () => {
+    const Consts = z.object({ mode: z.union(['a', 'b'] as const).default('a'), key: z.string().role('secret') })
+    const { value, secrets } = redactSecrets(Consts as z<never>, { mode: 'b', key: 'k' })
+    expect(value).toEqual({ mode: 'b' })
+    expect(secrets).toEqual([{ path: ['key'], set: true }])
+    expect(redactSecrets({ type: 'const' } as never, 5)).toEqual({ value: 5, secrets: [] })
+    expect(redactSecrets({ type: 'any' } as never, { whatever: 1 })).toEqual({ value: { whatever: 1 }, secrets: [] })
+  })
+
+  it('strips secrets declared in either object branch of a top-level union', () => {
+    const Either = z.union([
+      z.object({ apiKey: z.string().role('secret') }),
+      z.object({ nested: z.object({ apiKey: z.string().role('secret') }) }),
+    ])
+    const fromBranchTwo = redactSecrets(Either as z<never>, { nested: { apiKey: 'x' } })
+    expect(fromBranchTwo.value).toEqual({ nested: {} })
+    expect(fromBranchTwo.secrets).toEqual([
+      { path: ['apiKey'], set: false },
+      { path: ['nested', 'apiKey'], set: true },
+    ])
+    const fromBranchOne = redactSecrets(Either as z<never>, { apiKey: 'y' })
+    expect(fromBranchOne.value).toEqual({})
+    expect(fromBranchOne.secrets).toEqual([
+      { path: ['apiKey'], set: true },
+      { path: ['nested', 'apiKey'], set: false },
+    ])
+  })
+
+  it('enumerates union secret slots for an unset value', () => {
+    const Either = z.union([
+      z.object({ apiKey: z.string().role('secret') }),
+      z.object({ nested: z.object({ apiKey: z.string().role('secret') }) }),
+    ])
+    const { value, secrets } = redactSecrets(Either as z<never>, undefined)
+    expect(value).toBeUndefined()
+    expect(secrets).toEqual([
+      { path: ['apiKey'], set: false },
+      { path: ['nested', 'apiKey'], set: false },
+    ])
+  })
+
+  it('strips secrets declared in any member of an intersection', () => {
+    const Both = z.intersect([
+      z.object({ apiKey: z.string().role('secret') }),
+      z.object({ plain: z.string() }),
+    ])
+    const { value, secrets } = redactSecrets(Both as z<never>, { apiKey: 's', plain: 'p' })
+    expect(value).toEqual({ plain: 'p' })
+    expect(secrets).toEqual([{ path: ['apiKey'], set: true }])
+  })
+
+  it('walks tuple members by index', () => {
+    const Pair = z.tuple([z.string().role('secret'), z.string()])
+    const { value, secrets } = redactSecrets(Pair as z<never>, ['s', 'p'])
+    expect(value).toEqual([undefined, 'p'])
+    expect(secrets).toEqual([{ path: ['0'], set: true }])
+  })
+
+  it('redacts every secret array index when a union branch is an all-secret array', () => {
+    const List = z.union([z.array(z.string().role('secret')), z.string()])
+    const { value, secrets } = redactSecrets(List as z<never>, ['x', 'y'])
+    expect(value).toEqual([undefined, undefined])
+    expect(secrets).toEqual([
+      { path: ['0'], set: true },
+      { path: ['1'], set: true },
+    ])
+  })
+
+  it('resolves a secret declared at different depths in different union branches', () => {
+    // Branch one declares `a` itself a secret leaf; branch two declares a
+    // secret under `a`. The value matching branch two loses all of `a`.
+    const Shallow = z.union([
+      z.object({ a: z.string().role('secret') }),
+      z.object({ a: z.object({ x: z.string().role('secret') }) }),
+    ])
+    const { value, secrets } = redactSecrets(Shallow as z<never>, { a: { x: '1' } })
+    expect(value).toEqual({})
+    expect(secrets).toEqual([
+      { path: ['a'], set: true },
+      { path: ['a', 'x'], set: true },
+    ])
+  })
+
+  it('fails closed on a transform node, including one nested in a union branch', () => {
+    expect(() => redactSecrets(z.object({ blob: z.transform(z.string(), v => v.trim()) }) as z<never>, { blob: ' x ' }))
+      .toThrow(UnprovableSchemaError)
+    expect(() => redactSecrets(z.union([z.string(), z.transform(z.string(), v => v)]) as z<never>, 'x'))
+      .toThrow(UnprovableSchemaError)
+  })
+
+  it('fails closed on a lazy node and on an unknown node type', () => {
+    expect(() => redactSecrets(z.lazy(() => z.string()) as z<never>, 'x')).toThrow(UnprovableSchemaError)
+    expect(() => redactSecrets({ type: 'mystery' } as never, 'x')).toThrow(
+      'redactSecrets: a "mystery" node at [] can contain secrets the walker cannot verify',
+    )
+    expect(() => redactSecrets({} as never, 'x')).toThrow(
+      'redactSecrets: a "unknown" node at [] can contain secrets the walker cannot verify',
+    )
+  })
+})
+
+describe('scrubSchemaSecrets', () => {
+  it('removes meta.default from secret-marked nodes only, in place', () => {
+    const envelope = {
+      uid: 1,
+      refs: {
+        1: { type: 'object', dict: { apiKey: 2, plain: 3 } },
+        2: undefined,
+        3: { type: 'string', meta: { role: 'secret', default: 'leaked' } },
+        4: { type: 'string', meta: { default: 'visible' } },
+      },
+    }
+    const out = scrubSchemaSecrets(envelope)
+    expect(out).toBe(envelope)
+    const refs = envelope.refs as Record<string, { meta?: { default?: unknown } } | undefined>
+    expect(refs[3]).toEqual({ type: 'string', meta: { role: 'secret' } })
+    expect(refs[4]).toEqual({ type: 'string', meta: { default: 'visible' } })
+  })
+
+  it('returns non-envelope inputs untouched', () => {
+    expect(scrubSchemaSecrets(null)).toBeNull()
+    expect(scrubSchemaSecrets('nope')).toBe('nope')
+    expect(scrubSchemaSecrets({})).toEqual({})
+    expect(scrubSchemaSecrets({ refs: null })).toEqual({ refs: null })
   })
 })
 
@@ -164,5 +293,34 @@ describe('describe() layers and redaction', () => {
     expect(descriptor?.secrets).toEqual([{ path: ['apiKey'], set: true }])
     const [verbatim] = ctx.settings.describe()
     expect(verbatim?.value).toEqual({ apiKey: 'user-key', baseURL: 'https://user' })
+  })
+
+  it('keeps a secret field default out of the redacted schema envelope', async () => {
+    const ctx = await boot()
+    const WithDefault = z.object({
+      apiKey: z.string().role('secret').default('leaked-default'),
+      baseURL: z.string().default('https://visible'),
+    })
+    ctx.settings.register(NS, WithDefault)
+    const redactedRefs = (ctx.settings.describe({ redactSecrets: true })[0]?.schema as {
+      refs: Record<string, { meta?: { default?: unknown; role?: unknown } }>
+    }).refs
+    const verbatimRefs = (ctx.settings.describe()[0]?.schema as {
+      refs: Record<string, { meta?: { default?: unknown; role?: unknown } }>
+    }).refs
+    const secretNode = Object.values(redactedRefs).find(node => node.meta?.role === 'secret')!
+    const plainNode = Object.values(verbatimRefs).find(node => node.meta?.default === 'https://visible')!
+    expect(secretNode.meta).not.toHaveProperty('default')
+    expect(plainNode.meta?.default).toBe('https://visible')
+    // The envelope is minted per describe() call, so the verbatim one still carries the default.
+    const verbatimSecret = Object.values(verbatimRefs).find(node => node.meta?.role === 'secret')!
+    expect(verbatimSecret.meta?.default).toBe('leaked-default')
+  })
+
+  it('refuses to describe a namespace whose schema hides a secret behind a transform', async () => {
+    const ctx = await boot()
+    ctx.settings.register(NS, z.object({ blob: z.transform(z.string(), v => v.trim()) }))
+    expect(() => ctx.settings.describe()).not.toThrow()
+    expect(() => ctx.settings.describe({ redactSecrets: true })).toThrow(UnprovableSchemaError)
   })
 })

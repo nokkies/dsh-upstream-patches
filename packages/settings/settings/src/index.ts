@@ -9,11 +9,11 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import type z from '@deepseek-ai/schemastery'
 import { deepEqualJson, deepFreeze } from '@deepseek-ai/dsh-util-values'
-import { redactSecrets } from './redact.ts'
+import { redactSecrets, scrubSchemaSecrets } from './redact.ts'
 import type { RedactedSecret } from './redact.ts'
 import type { SettingsNamespace, SettingsUpdateSource } from './types.ts'
 
-export { redactSecrets } from './redact.ts'
+export { redactSecrets, scrubSchemaSecrets, UnprovableSchemaError } from './redact.ts'
 export type { RedactedSecret, RedactedValue } from './redact.ts'
 export type { SettingsNamespace, SettingsUpdateSource } from './types.ts'
 
@@ -529,6 +529,9 @@ export abstract class SettingsProvider extends Service {
       const redacted = redactSecrets(schema, registration.resolved)
       return {
         ...descriptor,
+        // The serialized schema envelope would otherwise carry a secret
+        // field's .default(...) to every client.
+        schema: scrubSchemaSecrets(descriptor.schema),
         value: redacted.value,
         ...base === undefined ? {} : { base: redactSecrets(schema, base).value },
         ...detachedUser === undefined ? {} : { user: redactSecrets(schema, detachedUser).value },

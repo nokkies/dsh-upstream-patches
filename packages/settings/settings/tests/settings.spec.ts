@@ -802,6 +802,23 @@ describe('SettingsProvider.installSection', () => {
     await unloading
     expect(changes).toEqual(['user'])
   })
+
+  it('forwards a consumer validate hook to the registration', async () => {
+    const ctx = new Context()
+    installSettingsSection(ctx, settingsNamespace('helper-ns'), HelperSchema, { theme: 'entry' }, {
+      setSource: () => {},
+      onChange: () => {},
+      validate: (value) => {
+        if (value.theme === 'forbidden') throw new Error('consumer rejects forbidden')
+      },
+    })
+    const fiber = ctx.plugin(MemorySettings, { doc: { 'helper-ns': { theme: 'user' } } })
+    await fiber
+    await expect(ctx.settings.update(settingsNamespace('helper-ns'), { theme: 'forbidden' }))
+      .rejects.toThrow('consumer rejects forbidden')
+    await ctx.settings.update(settingsNamespace('helper-ns'), { theme: 'allowed' })
+    expect(ctx.settings.get(settingsNamespace('helper-ns'))).toEqual({ theme: 'allowed' })
+  })
 })
 
 describe('mutate (path-addressed writes)', () => {
