@@ -78,11 +78,24 @@ function assertPositiveInteger(name: string, value: number): void {
   }
 }
 
+/**
+ * A timeout the shell executor cannot run with is a fail-open, not a disabled
+ * hook: the executor rejects, `runHook` contains that as a non-blocking result,
+ * and a `PreToolUse` deny is skipped while the tool runs. Positive **finite**,
+ * not integer, because that is the executors' own contract.
+ */
+function assertPositiveFinite(name: string, value: number): void {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`hooks-codex: ${name} must be a positive finite number`)
+  }
+}
+
 export function apply(ctx: Context, config: Config): void {
   // Validate before config parsing so a bad value cannot be hidden by its early return.
   const stderrSummaryMaxChars = config.stderrSummaryMaxChars ?? DEFAULT_STDERR_SUMMARY_MAX_CHARS
   assertPositiveInteger('stderrSummaryMaxChars', stderrSummaryMaxChars)
   const defaultTimeoutMs = config.defaultTimeoutMs ?? DEFAULT_HOOK_TIMEOUT_MS
+  assertPositiveFinite('defaultTimeoutMs', defaultTimeoutMs)
   let parsed: CodexHookConfig = {}
   try {
     const raw: unknown = JSON.parse(readFileSync(config.configPath, 'utf8'))

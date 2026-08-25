@@ -1,5 +1,18 @@
 import { describe, expect, it } from 'vitest'
+import { Context } from '@deepseek-ai/cordis'
 import { parseCodexConfig, CODEX_EVENTS } from '@deepseek-ai/dsh-hooks-codex/src/config.ts'
+import { apply } from '@deepseek-ai/dsh-hooks-codex/src/index.ts'
+
+// Pinned here rather than in coverage-cases.ts (LocalBashExecutor, win32-excluded)
+// so both platforms observe it; see the same note in the Claude bridge's spec.
+describe('apply — a hook timeout that cannot run is refused at load (upstream #583)', () => {
+  it('rejects a non-positive or non-finite defaultTimeoutMs', () => {
+    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => { apply(new Context(), { configPath: 'unused.json', defaultTimeoutMs: bad }) })
+        .toThrow(/hooks-codex: defaultTimeoutMs must be a positive finite number/)
+    }
+  })
+})
 
 describe('parseCodexConfig', () => {
   it('honors only the five bridge-supported Codex events, dropping the rest', () => {
@@ -21,6 +34,24 @@ describe('parseCodexConfig', () => {
     // The parser performs no config-time substitution; shell expansion happens later.
     expect(config.Stop).toEqual([{ hooks: [{ command: '${NOT_SUBSTITUTED}/s.sh', timeoutSec: 10 }] }])
     expect(config.UserPromptSubmit).toEqual([{ hooks: [{ command: 'u.sh', timeoutSec: 20 }] }])
+  })
+
+  it('rejects a hook timeout the executor cannot run with, through either spelling (upstream #460)', () => {
+    // Same fail-open as the Claude bridge: a non-positive timeout makes every
+    // invocation a non-blocking infrastructure error, so the hook never runs.
+    for (const bad of [0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => parseCodexConfig({
+        PreToolUse: [{ hooks: [{ type: 'command', command: 'x.sh', timeout: bad }] }],
+      })).toThrow(/invalid hook timeout .* on event "PreToolUse"/)
+      expect(() => parseCodexConfig({
+        PreToolUse: [{ hooks: [{ type: 'command', command: 'x.sh', timeoutSec: bad }] }],
+      })).toThrow(/invalid hook timeout .* on event "PreToolUse"/)
+    }
+  })
+
+  it('accepts a fractional timeout, which the executor runs fine', () => {
+    const { config } = parseCodexConfig({ Stop: [{ hooks: [{ type: 'command', command: 's.sh', timeout: 0.5 }] }] })
+    expect(config.Stop).toEqual([{ hooks: [{ command: 's.sh', timeoutSec: 0.5 }] }])
   })
 
   it('skips non-command and async:true hooks (recorded)', () => {

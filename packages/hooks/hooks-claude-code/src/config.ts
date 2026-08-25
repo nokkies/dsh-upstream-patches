@@ -6,7 +6,7 @@
  * @module @deepseek-ai/dsh-hooks-claude-code/config
  */
 
-import { matcherDiagnostic, type MatcherGroup } from '@deepseek-ai/dsh-hook-protocol'
+import { matcherDiagnostic, type MatcherGroup, timeoutDiagnostic } from '@deepseek-ai/dsh-hook-protocol'
 
 const CLAUDE_EVENTS = [
   'SessionStart',
@@ -100,6 +100,10 @@ export function parseClaudeCodeConfig(raw: unknown, vars: SubstitutionVars = {})
           continue
         }
         if (typeof hook.command !== 'string') continue
+        if (typeof hook.timeout === 'number') {
+          const diagnostic = timeoutDiagnostic(hook.timeout)
+          if (diagnostic !== undefined) throw new SyntaxError(`${diagnostic} on event ${JSON.stringify(event)}`)
+        }
         commands.push({
           command: substituteCommand(hook.command, vars),
           ...typeof hook.timeout === 'number' ? { timeoutSec: hook.timeout } : {},

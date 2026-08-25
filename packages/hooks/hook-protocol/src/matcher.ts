@@ -1,9 +1,12 @@
 /**
  * Matcher shared by both hook dialects. Claude treats alphanumeric/underscore/
- * pipe patterns as literal alternatives and other patterns as regex; Codex
- * treats every non-empty pattern as an unanchored regex. Missing, empty, and
- * `*` match all. Runtime matching contains invalid regexes as non-matches;
- * config parsers use {@link matcherDiagnostic} to reject them with a diagnostic.
+ * pipe patterns as literal alternatives — matched exactly but WITHOUT regard to
+ * case, because Claude's vocabulary is PascalCase and this harness registers
+ * lowercase tool names — and other patterns as regex; Codex treats every
+ * non-empty pattern as an unanchored regex. Regexes stay case-sensitive in both
+ * dialects. Missing, empty, and `*` match all. Runtime matching contains invalid
+ * regexes as non-matches; config parsers use {@link matcherDiagnostic} to reject
+ * them with a diagnostic.
  * @module @deepseek-ai/dsh-hook-protocol/matcher
  */
 
@@ -45,8 +48,10 @@ export function matcherDiagnostic(matcher: string | undefined, mode: MatcherMode
 
 /**
  * Whether `matcher` selects `query` under the given dialect. Claude literal
- * patterns exact-match pipe-separated alternatives; all other patterns are
- * unanchored regexes. Invalid regexes return `false` rather than throwing;
+ * patterns exact-match pipe-separated alternatives, ignoring case, so a
+ * `hooks.json` carried over from Claude Code (`Bash`, `Read`) still selects this
+ * harness's `bash` / `read`; all other patterns are unanchored, case-sensitive
+ * regexes. Invalid regexes return `false` rather than throwing;
  * bridge config parsers surface them through {@link matcherDiagnostic} before use.
  * @param matcher - the configured pattern; absent/empty/`'*'` are the match-all sentinels.
  * @param query - the candidate value (a tool name, a session source, …).
@@ -59,7 +64,12 @@ export function matchesMatcher(matcher: string | undefined, query: string, mode:
   // matcher is a non-empty string past the match-all guard.
   const pattern = matcher as string
   if (mode === 'claude-code' && CLAUDE_LITERAL.test(pattern)) {
-    return pattern.split('|').includes(query)
+    // Exact per-alternative, but case-insensitively: Claude's hooks.json
+    // vocabulary is PascalCase (`Bash`, `Read`) and this harness registers
+    // lowercase tool names, so a case-sensitive compare silently drops every
+    // matcher migrated from Claude Code -- including a PreToolUse deny.
+    const target = query.toLowerCase()
+    return pattern.split('|').some(alternative => alternative.toLowerCase() === target)
   }
   return compileRegex(pattern)?.test(query) ?? false
 }

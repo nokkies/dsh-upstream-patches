@@ -15,7 +15,7 @@ export type {
 } from './types.ts'
 export { matcherDiagnostic, matchesMatcher } from './matcher.ts'
 export { parseHookOutput } from './codec.ts'
-export { DEFAULT_HOOK_TIMEOUT_MS, runHook } from './runner.ts'
+export { DEFAULT_HOOK_TIMEOUT_MS, runHook, timeoutDiagnostic } from './runner.ts'
 export type { RunHookOptions, RunHookResult } from './runner.ts'
 export { mergeHookOutputs } from './merge.ts'
 export type { MergedDecision, MergedHookOutcome } from './merge.ts'

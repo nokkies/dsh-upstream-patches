@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { Context } from '@deepseek-ai/cordis'
 import { parseClaudeCodeConfig, substituteCommand } from '@deepseek-ai/dsh-hooks-claude-code/src/config.ts'
+import { apply } from '@deepseek-ai/dsh-hooks-claude-code/src/index.ts'
 
 describe('substituteCommand', () => {
   it('replaces CLAUDE_PLUGIN_ROOT and CLAUDE_PROJECT_DIR (all occurrences)', () => {
@@ -9,6 +11,20 @@ describe('substituteCommand', () => {
   })
   it('leaves the command untouched when no vars are supplied', () => {
     expect(substituteCommand('${CLAUDE_PLUGIN_ROOT}/x', {})).toBe('${CLAUDE_PLUGIN_ROOT}/x')
+  })
+})
+
+// The sibling `stderrSummaryMaxChars` assertion is covered in coverage-cases.ts,
+// which mounts LocalBashExecutor and is therefore excluded on win32. This
+// property needs no shell, so it is pinned here instead — where BOTH platforms
+// run it. A fail-open that only Linux can observe is the shape this repo has
+// been bitten by before.
+describe('apply — a hook timeout that cannot run is refused at load (upstream #583)', () => {
+  it('rejects a non-positive or non-finite defaultTimeoutMs', () => {
+    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => { apply(new Context(), { configPath: 'unused.json', defaultTimeoutMs: bad }) })
+        .toThrow(/hooks-claude-code: defaultTimeoutMs must be a positive finite number/)
+    }
   })
 })
 
@@ -68,6 +84,24 @@ describe('parseClaudeCodeConfig', () => {
     expect(() => parseClaudeCodeConfig({
       PreToolUse: [{ matcher: '(', hooks: [{ type: 'command', command: 'x.sh' }] }],
     })).toThrow('invalid claude-code regex matcher "(" on event "PreToolUse"')
+  })
+
+  it('rejects a hook timeout the executor cannot run with, naming the event (upstream #460)', () => {
+    // A non-positive timeout reaches bash-local's positive-finite assertion,
+    // whose rejection runHook collapses into a non-blocking result -- so the
+    // hook is skipped and the tool runs. Loud at parse, like a bad matcher.
+    for (const bad of [0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => parseClaudeCodeConfig({
+        PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'x.sh', timeout: bad }] }],
+      })).toThrow(/invalid hook timeout .* on event "PreToolUse"/)
+    }
+  })
+
+  it('accepts a fractional timeout, which the executor runs fine', () => {
+    // bash-local asserts positive FINITE, not integer, so 1.5s never fail-opens
+    // and rejecting it would break a working config.
+    const { config } = parseClaudeCodeConfig({ Stop: [{ hooks: [{ type: 'command', command: 's.sh', timeout: 1.5 }] }] })
+    expect(config.Stop).toEqual([{ hooks: [{ command: 's.sh', timeoutSec: 1.5 }] }])
   })
 
   it('discards matcher fields on events without matcher subjects before validation', () => {

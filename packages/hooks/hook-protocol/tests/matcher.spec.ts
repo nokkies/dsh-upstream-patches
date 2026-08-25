@@ -34,6 +34,29 @@ describe('matchesMatcher — claude dialect (literal-or-regex)', () => {
   })
 })
 
+describe('matchesMatcher — claude literals ignore case (upstream #582)', () => {
+  it("a Claude PascalCase literal selects the harness's lowercase tool name", () => {
+    // Claude Code's hooks.json vocabulary is PascalCase; this harness registers
+    // `bash` / `read` / `write`. A migrated PreToolUse deny must still fire.
+    expect(matchesMatcher('Bash', 'bash', 'claude-code')).toBe(true)
+    expect(matchesMatcher('Read', 'read', 'claude-code')).toBe(true)
+    expect(matchesMatcher('Edit|Write', 'write', 'claude-code')).toBe(true)
+  })
+
+  it('ignoring case does not widen a literal into a substring match', () => {
+    expect(matchesMatcher('Bash', 'bashoutput', 'claude-code')).toBe(false)
+    expect(matchesMatcher('Bash', 'BashOutput', 'claude-code')).toBe(false)
+    expect(matchesMatcher('Edit|Write', 'writefile', 'claude-code')).toBe(false)
+  })
+
+  it('the regex path keeps its case sensitivity in both dialects', () => {
+    // `^Bash$` is not the literal charset, so it stays a regex — and regexes are
+    // where a user asks for exact control. Widening them would be a surprise.
+    expect(matchesMatcher('^Bash$', 'bash', 'claude-code')).toBe(false)
+    expect(matchesMatcher('Bash', 'bash', 'codex')).toBe(false)
+  })
+})
+
 describe('matchesMatcher — codex dialect (always regex)', () => {
   it('a word pattern is an unanchored regex (substring matches, unlike claude literal)', () => {
     expect(matchesMatcher('Bash', 'Bash', 'codex')).toBe(true)

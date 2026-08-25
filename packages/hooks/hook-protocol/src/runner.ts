@@ -19,6 +19,30 @@ import type { CommandHook, HookOutput } from './types.ts'
  */
 export const DEFAULT_HOOK_TIMEOUT_MS = 600_000
 
+/**
+ * Validate a configured hook timeout before a bridge accepts it, mirroring
+ * {@link matcherDiagnostic}'s parse-time role.
+ *
+ * A timeout the shell executor cannot run with is a **fail-open**, not a
+ * disabled hook: executors assert positive-and-finite, {@link runHook} contains
+ * that rejection as a non-blocking `exitCode: undefined` result, and the merged
+ * outcome is then "no decision" — so a `PreToolUse` deny is skipped and the tool
+ * runs. Rejecting it where it is configured keeps misconfiguration loud.
+ *
+ * Positive **finite** rather than positive integer, because that is exactly the
+ * executors' own contract: a fractional `1.5` second timeout runs fine and must
+ * not be refused.
+ * @param timeoutSec - the configured per-hook timeout, in seconds.
+ * @returns `undefined` when the timeout is runnable, otherwise a stable diagnostic.
+ */
+export function timeoutDiagnostic(timeoutSec: number): string | undefined {
+  return Number.isFinite(timeoutSec) && timeoutSec > 0
+    ? undefined
+    // String(), not JSON.stringify(): the latter renders NaN and Infinity as
+    // `null`, erasing the two values a reader most needs named back to them.
+    : `invalid hook timeout ${String(timeoutSec)} (must be a positive finite number of seconds)`
+}
+
 /** Everything a single hook invocation needs beyond its command line. */
 export interface RunHookOptions {
   /** The JSON payload object written to the hook's stdin (the bridge builds it). */

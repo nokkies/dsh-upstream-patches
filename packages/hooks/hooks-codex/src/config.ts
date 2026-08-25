@@ -5,7 +5,7 @@
  * @module @deepseek-ai/dsh-hooks-codex/config
  */
 
-import { matcherDiagnostic, type MatcherGroup } from '@deepseek-ai/dsh-hook-protocol'
+import { matcherDiagnostic, type MatcherGroup, timeoutDiagnostic } from '@deepseek-ai/dsh-hook-protocol'
 
 /** The five Codex hook points this bridge supports. */
 export const CODEX_EVENTS = ['PreToolUse', 'PostToolUse', 'SessionStart', 'UserPromptSubmit', 'Stop'] as const
@@ -69,6 +69,10 @@ export function parseCodexConfig(raw: unknown): ParsedCodexConfig {
         // Codex accepts `timeout` or the `timeoutSec` alias.
         const timeout = typeof hook.timeout === 'number' ? hook.timeout
           : typeof hook.timeoutSec === 'number' ? hook.timeoutSec : undefined
+        if (timeout !== undefined) {
+          const timeoutFault = timeoutDiagnostic(timeout)
+          if (timeoutFault !== undefined) throw new SyntaxError(`${timeoutFault} on event ${JSON.stringify(event)}`)
+        }
         commands.push({ command: hook.command, ...timeout !== undefined ? { timeoutSec: timeout } : {} })
       }
       if (commands.length === 0) continue
