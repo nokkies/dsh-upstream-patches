@@ -76,7 +76,17 @@ export const contextBreakdownProjectionDefinition = {
     return {
       systemTokens,
       toolsTokens,
-      messageTokens: state.messageTokens + fold.deltaTokens,
+      // Clamped, because the subtrahend and the running total do not come from
+      // the same set. A replacement's delta is `summary - claim`, where the
+      // claim prices everything the compaction shadowed, while this total
+      // holds only the appends THIS projection folded — a checkpoint resumed
+      // mid-session, or a wide compress over history the fold never saw, makes
+      // the claim legitimately larger. Both schemas here declare
+      // `nonnegative`, so letting it go negative does not merely misreport: it
+      // fails validation on every subsequent turn and the session can never
+      // continue (upstream #4674). Under-reporting until the total recovers is
+      // the strictly better failure for an estimate.
+      messageTokens: Math.max(0, state.messageTokens + fold.deltaTokens),
       ...fold.claim === undefined ? {} : { claim: fold.claim },
     }
   },

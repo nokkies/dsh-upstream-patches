@@ -227,6 +227,48 @@ describe('contextBreakdown session projection', () => {
       ))
   })
 
+  it('clamps messageTokens at zero when a shadow prices more than the fold accumulated', () => {
+    // A replacement's delta is `summary - claim`, and the claim is the metered
+    // cost of everything the compaction shadows. A wide compress can therefore
+    // subtract far more than this projection ever added — its running total
+    // counts only the appends IT folded, which is not the same set. The state
+    // and wire schemas both declare `nonnegative`, so a negative total is not
+    // merely wrong: zod rejects it on every following turn and the session can
+    // never continue (upstream #4674 — 1214 seqs compressed at once, then
+    // "Too small: expected number to be >=0" on every retry, forever).
+    const definition = contextBreakdownProjectionDefinition
+    const seeded: SessionEvent = {
+      type: 'user/message',
+      seq: 1,
+      time: 0,
+      data: createUserMessage({ content: [{ type: 'text', text: 'x' }], source: { kind: 'user' } }),
+      surfaceOp: 'append',
+    } as unknown as SessionEvent
+    const wideMeter = (seq: number): SessionEvent => ({
+      type: 'compaction/prune',
+      seq,
+      time: 0,
+      data: { shadowedRange: { start: 1, end: 1 }, shadowedSeqs: [1], shadowedTokenCount: 500_000 },
+    } as unknown as SessionEvent)
+    const replace = (seq: number): SessionEvent => ({
+      type: 'user/message',
+      seq,
+      time: 0,
+      data: createUserMessage({ content: [{ type: 'text', text: 'x' }], source: { kind: 'user' } }),
+      surfaceOp: { op: 'replace', start: 1, end: 1 },
+      sourceEventSeqs: [1],
+    } as unknown as SessionEvent)
+
+    let state = definition.apply(definition.init(), seeded)
+    state = definition.apply(state, wideMeter(2))
+    state = definition.apply(state, replace(3))
+
+    expect(definition.wire.view(state).messageTokens).toBe(0)
+    // The wire view is what the schema rejects, so prove it validates rather
+    // than merely reading as zero.
+    expect(() => definition.wire.viewSchema.parse(definition.wire.view(state))).not.toThrow()
+  })
+
   it('keeps the persisted checkpoint O(1) as the surface grows and compacts', async () => {
     const { ctx, session } = await harness()
     const first = appendUser(session, 'the first of many messages')
