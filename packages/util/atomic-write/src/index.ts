@@ -120,6 +120,15 @@ export interface FileLockOptions {
  * after the deadline. The contender never removes an existing lock because
  * file age cannot prove that its owner stopped; orphan recovery is an operator
  * action. The parent directory must exist.
+ *
+ * That refusal is what makes RELEASING the lock load-bearing rather than
+ * incidental: a lock outliving its holder never heals, so the release retries
+ * the transient Windows refusals to unlink a file another process holds open
+ * (see {@link MAX_LOCK_RELEASE_ATTEMPTS}). A release that still cannot happen
+ * after a successful operation is reported rather than swallowed, because the
+ * alternative is returning success while every future write to the file is
+ * already doomed. When the operation itself threw, the release stays quiet and
+ * that error propagates unchanged.
  * @param filename - the file whose writers this lock serializes.
  * @param operation - the read-render-commit cycle to run while holding the lock.
  * @param options - acquisition options; omitted waits {@link DEFAULT_LOCK_WAIT_MS}.
@@ -147,8 +156,61 @@ export async function withFileLock<T>(
     delay = Math.min(delay * 2, LOCK_RETRY_MAX_MS)
   }
   try {
-    return await operation()
-  } finally {
-    await rm(lockPath, { force: true })
+    const result = await operation()
+    // Release on the success path is NOT best-effort. A lock that outlives its
+    // holder is permanent by design -- a contender refuses to remove a lock it
+    // does not own, and nothing ages one out -- so a silent failure here
+    // reports success while bricking every future write to this file. Failing
+    // loudly names the file to delete; the alternative is a product that stops
+    // saving settings and says nothing.
+    await releaseFileLock(lockPath, 'strict')
+    return result
+  } catch (error) {
+    // The operation's own failure is the more useful one, so the release must
+    // not overwrite it -- but it still gets the retries, because a leak here is
+    // just as permanent.
+    await releaseFileLock(lockPath, 'best-effort')
+    throw error
+  }
+}
+
+/**
+ * How many times to reattempt a refused lock removal before giving up.
+ *
+ * Removing the lock is the one step that has no alternative: `force` covers a
+ * lock already gone, but not a Windows refusal to unlink a file something else
+ * holds open. An antivirus scanner reading the just-written file, or a watcher
+ * (this repo runs chokidar over exactly these paths), takes a transient handle
+ * and the unlink fails EPERM/EBUSY/EACCES for as long as it is held -- usually
+ * milliseconds. POSIX unlinks a file with open handles happily, which is why
+ * this is a Windows-shaped bug that survived CI on every other platform.
+ */
+const MAX_LOCK_RELEASE_ATTEMPTS = 5
+const LOCK_RELEASE_RETRY_MS = 20
+
+/**
+ * Remove the writer lock, retrying the transient Windows sharing refusals.
+ * @param lockPath - the lock created by this holder.
+ * @param mode - `strict` rethrows a lock that would not go, naming it;
+ *   `best-effort` returns quietly so it cannot mask a failure already in hand.
+ */
+async function releaseFileLock(lockPath: string, mode: 'strict' | 'best-effort'): Promise<void> {
+  let delay = LOCK_RELEASE_RETRY_MS
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await rm(lockPath, { force: true })
+      return
+    } catch (error) {
+      if (attempt >= MAX_LOCK_RELEASE_ATTEMPTS) {
+        if (mode === 'best-effort') return
+        throw new Error(
+          `atomic-write: wrote ${lockPath.replace(/\.lock$/u, '')} but could not remove its writer lock at `
+          + `${lockPath}; every later write to this file will time out until it is deleted`,
+          { cause: error },
+        )
+      }
+      await new Promise(resolve => setTimeout(resolve, delay))
+      delay *= 2
+    }
   }
 }
