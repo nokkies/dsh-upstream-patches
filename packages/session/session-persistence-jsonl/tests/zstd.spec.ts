@@ -763,3 +763,56 @@ describe('JsonlSessionPersistence: encoding selection', () => {
     expect((await readdir(sessionDir(root, header.cwd, header.id))).some(name => name.endsWith('.jsonl.zstd'))).toBe(false)
   })
 })
+
+/**
+ * A session that accumulated BOTH encodings is per-session damage, not a
+ * misconfigured root, and enumeration must tell the two apart: refusing the
+ * whole walk over one duplicated session denies every caller that lists --
+ * subagent spawn, resume and enumerate alike -- for a session none of them
+ * asked for (upstream #4746).
+ */
+describe('a session holding both encodings', () => {
+  it('is skipped without hiding the healthy sessions beside it', async () => {
+    const root = await freshRoot('dsh-jsonl-dual-')
+    const ctx = await mount(root)
+
+    const healthy = meta('healthy-session', '/dual')
+    await ctx.sessionPersistence.create(healthy)
+    await ctx.sessionPersistence.append(healthy.id, oneTurnLog())
+
+    const doubled = meta('doubled-session', '/dual')
+    await ctx.sessionPersistence.create(doubled)
+    await ctx.sessionPersistence.append(doubled.id, oneTurnLog())
+    // The reported shape: a redundant uncompressed copy beside the compressed
+    // original, contents agreeing.
+    await writeFile(logPath(root, doubled.cwd, doubled.id, 'none'), [
+      JSON.stringify(toHeaderLine(doubled)),
+      ...oneTurnLog().map(e => JSON.stringify(e)),
+      '',
+    ].join('\n'))
+
+    const listed = await ctx.sessionPersistence.list()
+
+    // The claim is that enumeration SURVIVES, and that the survivor is the
+    // healthy session rather than an empty list.
+    expect(listed.map(header => header.id)).toEqual([healthy.id])
+  })
+
+  it('still fails loud when only the opposite artifact is present', async () => {
+    // Unchanged contract: an opposite artifact with no matching one means the
+    // ROOT belongs to the other encoding, which is a configuration error about
+    // every session at once. Skipping there would report an empty store to
+    // someone whose sessions are all intact under the other mode.
+    const root = await freshRoot('dsh-jsonl-wrong-root-')
+    const ctx = await mount(root)
+    const stray = meta('opposite-only', '/wrong')
+    await mkdir(sessionDir(root, stray.cwd, stray.id), { recursive: true })
+    await writeFile(logPath(root, stray.cwd, stray.id, 'none'), [
+      JSON.stringify(toHeaderLine(stray)),
+      ...oneTurnLog().map(e => JSON.stringify(e)),
+      '',
+    ].join('\n'))
+
+    await expect(ctx.sessionPersistence.list()).rejects.toThrow(/uses \.jsonl/)
+  })
+})

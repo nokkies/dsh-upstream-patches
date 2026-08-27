@@ -498,10 +498,38 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
         const opposite = join(dir, `session${logSuffix(this.oppositeCompression())}`)
         const oppositeExists = await this.exists(opposite)
         signal?.throwIfAborted()
-        if (oppositeExists) throw this.encodingMismatch(opposite)
         const path = join(dir, `session${logSuffix(this.compression)}`)
         const pathExists = await this.exists(path)
         signal?.throwIfAborted()
+        // Two different situations wear the same suffix mismatch, and only one
+        // of them is this backend's business to refuse.
+        //
+        // Opposite artifact ALONE: the root belongs to the other encoding, so
+        // the caller pointed a zstd backend at a raw store or the reverse.
+        // That is a configuration error about the whole root, every session
+        // reads the same way, and failing loud is the only honest answer --
+        // skipping would report an empty store to someone whose sessions are
+        // all present and readable under the other mode.
+        //
+        // BOTH artifacts: one session accumulated a second copy. That is
+        // per-session damage, and refusing here denies EVERY caller that
+        // lists -- subagent spawn, resume and enumerate alike -- over a
+        // session none of them asked for (upstream #4746). Skip it, name it,
+        // and let the rest of the store work. The refusal that matters is
+        // `materialize`'s, which stops the second artifact being CREATED; once
+        // a pair exists, hiding the other sessions helps nobody. It also
+        // matches how the rest of this walk treats damage: an empty log and an
+        // unparseable header are both skipped below, and either is worse than
+        // a duplicate whose contents agree.
+        if (oppositeExists) {
+          if (!pathExists) throw this.encodingMismatch(opposite)
+          this.ctx.logger.warn(
+            `${this.name}: skipping session directory ${JSON.stringify(dir)} — it holds BOTH `
+            + `${logSuffix(this.compression)} and ${logSuffix(this.oppositeCompression())} artifacts; `
+            + 'remove the one that does not match this backend to make the session visible again',
+          )
+          continue
+        }
         if (!pathExists) continue
         // Read only headers so listing scales with session count, not log size.
         const first = this.compression === 'zstd'
