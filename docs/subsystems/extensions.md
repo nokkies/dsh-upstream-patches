@@ -21,8 +21,27 @@ Registry and cross-page router behind the two model-facing inspect tools.
 ```ts cordis-catalog
 /**
  * Register one Host provider.
+ *
+ * An id may be registered more than once, because this registry is
+ * process-global while the packages that populate it mount per preset: two
+ * cordis-based presets in one process each register the same first-party
+ * providers, and the second mount used to fail outright. Repeat
+ * registrations of the SAME contract therefore share one entry rather than
+ * colliding. They are interchangeable: the catalog providers are pure
+ * functions over generated constants, and the live Tool view resolves the
+ * one shared tools service and filters by the REQUESTING agent, not by the
+ * context that happened to mount it.
+ *
+ * Sharing rather than replacing is the load-bearing half. A replacing
+ * registry would let the second mount's disposer drop an entry the first
+ * mount is still relying on, so unmounting one preset would silently take
+ * another preset's inspect providers dark — an ordering-dependent capability
+ * loss, strictly worse than the loud error it removed.
+ *
+ * A same-id registration carrying a DIFFERENT manifest is still a real
+ * collision and still throws, which is the case the error was written for.
  * @param registration - manifest and local query handler.
- * @returns idempotent disposer.
+ * @returns idempotent disposer; the entry survives until the last holder disposes.
  */
 register(registration: HostCordisInspectProviderRegistration): () => void
 

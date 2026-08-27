@@ -45,6 +45,12 @@ declare module '@deepseek-ai/cordis' {
 /** Registry and cross-page router behind the two model-facing inspect tools. */
 export class CordisInspectRegistryService extends Service {
   private readonly providers = new Map<string, HostCordisInspectProviderRegistration>()
+  /**
+   * Live holders of each registered id. The serving entry in {@link providers}
+   * outlives every holder but the last, so one id shared by several mounts is
+   * removed exactly when the last of them disposes.
+   */
+  private readonly holders = new Map<string, Set<object>>()
   private readonly pending = new Map<CordisInspectRequestId, PendingClientQuery>()
   private clientManifest: readonly CordisInspectProviderManifest[] | undefined
   private nextRequest = 1
@@ -56,16 +62,47 @@ export class CordisInspectRegistryService extends Service {
 
   /**
    * Register one Host provider.
+   *
+   * An id may be registered more than once, because this registry is
+   * process-global while the packages that populate it mount per preset: two
+   * cordis-based presets in one process each register the same first-party
+   * providers, and the second mount used to fail outright. Repeat
+   * registrations of the SAME contract therefore share one entry rather than
+   * colliding. They are interchangeable: the catalog providers are pure
+   * functions over generated constants, and the live Tool view resolves the
+   * one shared tools service and filters by the REQUESTING agent, not by the
+   * context that happened to mount it.
+   *
+   * Sharing rather than replacing is the load-bearing half. A replacing
+   * registry would let the second mount's disposer drop an entry the first
+   * mount is still relying on, so unmounting one preset would silently take
+   * another preset's inspect providers dark — an ordering-dependent capability
+   * loss, strictly worse than the loud error it removed.
+   *
+   * A same-id registration carrying a DIFFERENT manifest is still a real
+   * collision and still throws, which is the case the error was written for.
    * @param registration - manifest and local query handler.
-   * @returns idempotent disposer.
+   * @returns idempotent disposer; the entry survives until the last holder disposes.
    */
   register(registration: HostCordisInspectProviderRegistration): () => void {
     const manifest = validateManifest(registration.manifest)
-    if (this.providers.has(manifest.id)) throw new Error(`Host Cordis inspect provider "${manifest.id}" is already registered`)
-    const stored = { ...registration, manifest }
-    this.providers.set(manifest.id, stored)
+    const existing = this.providers.get(manifest.id)
+    if (existing !== undefined && canonicalJson(existing.manifest) !== canonicalJson(manifest)) {
+      throw new Error(`Host Cordis inspect provider "${manifest.id}" is already registered`)
+    }
+    if (existing === undefined) this.providers.set(manifest.id, { ...registration, manifest })
+    const holders = this.holders.get(manifest.id) ?? new Set<object>()
+    // Identity, not a counter: a disposer that already ran deletes nothing on a
+    // second call, so idempotency costs no bookkeeping.
+    const token = {}
+    holders.add(token)
+    this.holders.set(manifest.id, holders)
     return () => {
-      if (this.providers.get(manifest.id) === stored) this.providers.delete(manifest.id)
+      const live = this.holders.get(manifest.id)
+      if (live === undefined || !live.delete(token)) return
+      if (live.size > 0) return
+      this.holders.delete(manifest.id)
+      this.providers.delete(manifest.id)
     }
   }
 
@@ -200,6 +237,26 @@ export class CordisInspectRegistryService extends Service {
 
 function view(platform: CordisInspectPlatform, manifest: CordisInspectProviderManifest): CordisInspectProviderView {
   return { platform, ...manifest, methods: [...manifest.methods] }
+}
+
+/**
+ * Serialize a validated manifest so two registrations of one id can be compared
+ * for contract equality. Key order carries no meaning in a manifest, so it must
+ * not decide whether a repeat mount is a duplicate or a collision.
+ * @param value - any lossless-JSON fragment of a validated manifest.
+ * @returns a stable string, equal exactly when the contracts are equal.
+ */
+function canonicalJson(value: unknown): string {
+  // `undefined` is absent rather than a value, and JSON.stringify is typed as
+  // always returning a string, so it has to be settled before the call.
+  if (value === undefined) return 'null'
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  const entries = Object.entries(value)
+    .filter(([, entry]) => entry !== undefined)
+    // Manifest keys are unique, so the comparator never sees a tie.
+    .sort(([left], [right]) => (left > right ? 1 : -1))
+  return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`).join(',')}}`
 }
 
 function validateManifest(manifest: CordisInspectProviderManifest): CordisInspectProviderManifest {
