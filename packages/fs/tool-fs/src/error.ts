@@ -32,3 +32,33 @@ export function remediateFsError(error: unknown): unknown {
   if (!remedy) return error
   return new FsError(`${error.message} — ${remedy}`, error.code, { cause: error })
 }
+
+/**
+ * A URI scheme followed by an authority, e.g. `https://`. Deliberately not
+ * anchored to http alone: any scheme reaching a path parameter is the same
+ * mistake.
+ */
+const URI_SCHEME = /^([a-z][a-z0-9+.-]*):\/\//i
+
+/**
+ * Reject a URL supplied where a filesystem path belongs, with the remedy.
+ *
+ * `path.resolve` treats a URL as a relative segment, so
+ * `https://example.com/a.txt` becomes `<cwd>/https:/example.com/a.txt` and the
+ * model receives `not found` for a path it never asked for. The condition is
+ * stated but the recovery is not, which is the same gap `remediateFsError`
+ * closes for guarded mutations -- so it is closed here in the same place, at
+ * the model boundary, before the call reaches the filesystem at all.
+ * @param requestedPath - the raw path supplied to the tool.
+ */
+export function assertFilesystemPath(requestedPath: string): void {
+  const scheme = URI_SCHEME.exec(requestedPath)?.[1]?.toLowerCase()
+  if (scheme === undefined) return
+  const remedy = scheme === 'http' || scheme === 'https'
+    ? 'fetch web content with a web tool such as `web_fetch`'
+    : 'supply a filesystem path instead'
+  throw new FsError(
+    `"${requestedPath}" is a ${scheme} URL, not a filesystem path — ${remedy}`,
+    'FS_NOT_FOUND',
+  )
+}

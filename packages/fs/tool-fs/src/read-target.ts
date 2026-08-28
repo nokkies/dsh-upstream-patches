@@ -7,6 +7,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { FsError } from '@deepseek-ai/dsh-fs'
 import type { FsInfo, FsTarget } from '@deepseek-ai/dsh-fs'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
+import { assertFilesystemPath } from './error.ts'
 import { sessionResolveOptions } from './session-cwd.ts'
 
 /**
@@ -21,6 +22,7 @@ export async function resolveRegularReadTarget(
   exec: ToolExecution,
   requestedPath: string,
 ): Promise<{ target: FsTarget; info: FsInfo }> {
+  assertFilesystemPath(requestedPath)
   const target = await ctx.fs.resolve(requestedPath, sessionResolveOptions(exec, requestedPath))
   const info = await ctx.fs.stat(target, exec.signal)
   if (info === undefined) {
